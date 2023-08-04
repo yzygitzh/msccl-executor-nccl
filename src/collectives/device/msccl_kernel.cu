@@ -11,6 +11,10 @@
 #include "msccl/msccl_struct.h"
 #include "msccl/msccl_kernel.h"
 
+#if defined(ENABLE_NPKIT)
+#include "npkit/npkit.h"
+#endif
+
 __shared__ struct mscclShmemData mscclShmem;
 
 #define MSCCL_MAX_ITER 65536
@@ -124,6 +128,25 @@ __device__ __forceinline__ void mscclRunInterpreter(
   }
   __syncthreads(); // publish shmem
   
+#if defined(ENABLE_NPKIT)
+  int npKitCtxIdx = bid;
+#endif
+
+#if defined(ENABLE_NPKIT) && defined(ENABLE_NPKIT_EVENT_TIME_SYNC_CPU)
+  if (tid == 0) {
+    uint64_t* cpuTimestamp = ncclShmem.comm.cpuTimestamp;
+    NpKit::CollectGpuEvent(NPKIT_EVENT_TIME_SYNC_CPU, 0, 0, *cpuTimestamp,
+        ncclShmem.comm.npKitEventCollectContexts + npKitCtxIdx);
+  }
+#endif
+
+#if defined(ENABLE_NPKIT) && defined(ENABLE_NPKIT_EVENT_TIME_SYNC_GPU)
+  if (tid == 0) {
+    NpKit::CollectGpuEvent(NPKIT_EVENT_TIME_SYNC_GPU, 0, 0, clock64(),
+        ncclShmem.comm.npKitEventCollectContexts + npKitCtxIdx);
+  }
+#endif
+
   // Deference reduce args if required
   if (tid == 0 && mscclShmem.work.hasReduce && mscclShmem.work.redOpArgIsPtr) {
     switch (sizeof(T)) {
@@ -165,6 +188,12 @@ __device__ __forceinline__ void mscclRunInterpreter(
   RedOp redFn(mscclShmem.work.redOpArg);
   Primitives<T, RedOp, FanAsymmetric<1,1>, 1, Proto, 0> prims
     (tid, nthreads, &recvPeer, &sendPeer, thisInput, thisOutput, mscclShmem.work.redOpArg);
+
+#if defined(ENABLE_NPKIT)
+  if (tid == 0) {
+    prims.npKitCtxIdx = npKitCtxIdx;
+  }
+#endif
 
   const ssize_t sizePerMscclChunk = mscclShmem.work.count / mscclShmem.work.nChunksPerLoop;
   uint32_t maxAllowedCount = mscclShmem.work.maxAllowedCount;
