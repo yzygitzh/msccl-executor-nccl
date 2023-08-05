@@ -250,6 +250,13 @@ __device__ __forceinline__ void mscclRunInterpreter(
         else if (t->type == MSCCL_REDUCE) {
           int numReductions = t->numReductions;
           if (thisNelem < nthreads){
+#if defined(ENABLE_NPKIT) && defined(ENABLE_NPKIT_EVENT_MSCCL_REDUCE_ENTRY)
+            if (tid == 0) {
+              NpKit::CollectGpuEvent(NPKIT_EVENT_MSCCL_REDUCE_ENTRY, thisNelem*sizeof(T), 0, clock64(),
+                  ncclShmem.comm.npKitEventCollectContexts + npKitCtxIdx);
+            }
+#endif
+
             if (tid < thisNelem){
               dstOffset = gridOffset + (ssize_t) (t->dstOffset+c) * sizePerMscclChunk;
               T* dstIndex = dstPointer + dstOffset + tid;
@@ -263,6 +270,14 @@ __device__ __forceinline__ void mscclRunInterpreter(
               }
               store(dstIndex, o);
             }
+
+#if defined(ENABLE_NPKIT) && defined(ENABLE_NPKIT_EVENT_MSCCL_REDUCE_EXIT)
+            if (tid == 0) {
+              NpKit::CollectGpuEvent(NPKIT_EVENT_MSCCL_REDUCE_EXIT, thisNelem*sizeof(T), 0, clock64(),
+                  ncclShmem.comm.npKitEventCollectContexts + npKitCtxIdx);
+            }
+#endif
+
             barrier(nthreads);
           } else {
             T* srcs[MSCCL_MAX_REDUCE_FUSION+1]; // +1 is for SIMPLE protocol as dst is added in the list of srcs

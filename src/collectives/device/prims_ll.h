@@ -411,6 +411,13 @@ private:
 
 template <int REDUCE, int COPY, int MULTISRCS, int MULTIDSTS>
   __device__ __forceinline__ void mscclGenericOp(T** srcs, int nsrcs, T** dsts, int ndsts, int nelem) {
+#if defined(ENABLE_NPKIT) && defined(ENABLE_NPKIT_EVENT_MSCCL_GENERIC_OP_ENTRY)
+    if (tid == 0) {
+      NpKit::CollectGpuEvent(NPKIT_EVENT_MSCCL_GENERIC_OP_ENTRY, nelem*sizeof(T), 0, clock64(),
+          ncclShmem.comm.npKitEventCollectContexts + npKitCtxIdx);
+    }
+#endif
+
     nelem = nelem < 0 ? 0 : nelem;
     T *srcElts = srcs[0];
     T *dstElts = dsts[0];
@@ -469,6 +476,14 @@ template <int REDUCE, int COPY, int MULTISRCS, int MULTIDSTS>
       nelem -= eltPerTrip;
       offset += nthreads;
     }
+
+#if defined(ENABLE_NPKIT) && defined(ENABLE_NPKIT_EVENT_MSCCL_GENERIC_OP_EXIT)
+    if (tid == 0) {
+      NpKit::CollectGpuEvent(NPKIT_EVENT_MSCCL_GENERIC_OP_EXIT, nelem*sizeof(T), 0, clock64(),
+          ncclShmem.comm.npKitEventCollectContexts + npKitCtxIdx);
+    }
+#endif
+
     barrier();
   }
 

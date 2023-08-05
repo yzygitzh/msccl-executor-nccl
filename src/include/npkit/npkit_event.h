@@ -95,4 +95,9 @@
 
 #define NPKIT_PRIM_COLLECT_DATA_PROCESS_TIME                    0x4F
 
+#define NPKIT_EVENT_MSCCL_GENERIC_OP_ENTRY                      0x50
+#define NPKIT_EVENT_MSCCL_GENERIC_OP_EXIT                       0x51
+#define NPKIT_EVENT_MSCCL_REDUCE_ENTRY                          0x52
+#define NPKIT_EVENT_MSCCL_REDUCE_EXIT                           0x53
+
 #endif
