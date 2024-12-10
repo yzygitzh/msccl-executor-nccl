@@ -78,6 +78,8 @@ const char* ncclProtoToString(int proto) {
 #include "msccl/msccl_setup.h"
 #include "msccl/msccl_status.h"
 
+NCCL_PARAM(ARAllGatherEnabled, "AR_ALLGATHER_ENABLED", 0);
+
 NCCL_API(ncclResult_t, ncclAllGather, const void* sendbuff, void* recvbuff, size_t sendcount,
     ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
 ncclResult_t ncclAllGather(const void* sendbuff, void* recvbuff, size_t sendcount,
@@ -89,17 +91,38 @@ ncclResult_t ncclAllGather(const void* sendbuff, void* recvbuff, size_t sendcoun
   size_t msgsize = sendcount * ncclTypeSize(datatype);
   NVTX3_FUNC_WITH_PARAMS(AllGather, AllGatherSchema, msgsize)
 
-  if (mscclAvailable() && !mscclIsCaller()) {
-    return mscclEnqueueCheck(
-      sendbuff, nullptr, nullptr, recvbuff, nullptr, nullptr,
-      sendcount, datatype, 0, 0, ncclSum, mscclFuncAllGather, comm, stream);
-  }
+  if (ncclParamARAllGatherEnabled()) {
+    int nRanks;
+    NCCLCHECK(ncclCommCount(comm, &nRanks));
+    uint64_t totalcount = sendcount * nRanks;
+    uint64_t totalsize = msgsize * nRanks;
+    uint64_t offset = comm->rank * msgsize;
+    if (offset > 0) {
+      CUDACHECK(cudaMemsetAsync((void*)recvbuff, 0, offset, stream));
+    }
+    if ((uint64_t)sendbuff != (uint64_t)recvbuff + offset) {
+      CUDACHECK(cudaMemcpyAsync((void*)((uint64_t)recvbuff + offset), sendbuff, msgsize, cudaMemcpyDeviceToDevice, stream));
+    }
+    if (offset + msgsize < totalsize) {
+      CUDACHECK(cudaMemsetAsync((void*)((uint64_t)recvbuff + offset + msgsize), 0, totalsize - offset - msgsize, stream));
+    }
+    struct ncclInfo info = { ncclFuncAllReduce, "AllReduce",
+      recvbuff, recvbuff, totalcount, datatype, ncclSum, 0, comm, stream, /* Args */
+      ALLREDUCE_CHUNKSTEPS, ALLREDUCE_SLICESTEPS };
+    return ncclEnqueueCheck(&info);
+  } else {
+    if (mscclAvailable() && !mscclIsCaller()) {
+      return mscclEnqueueCheck(
+        sendbuff, nullptr, nullptr, recvbuff, nullptr, nullptr,
+        sendcount, datatype, 0, 0, ncclSum, mscclFuncAllGather, comm, stream);
+    }
 
-  struct ncclInfo info = { ncclFuncAllGather, "AllGather",
-    sendbuff, recvbuff, sendcount, datatype, ncclSum, 0, comm, stream, /* Args */
-    ALLGATHER_CHUNKSTEPS, ALLGATHER_SLICESTEPS };
-  NCCLCHECK(ncclEnqueueCheck(&info));
-  return ncclSuccess;
+    struct ncclInfo info = { ncclFuncAllGather, "AllGather",
+      sendbuff, recvbuff, sendcount, datatype, ncclSum, 0, comm, stream, /* Args */
+      ALLGATHER_CHUNKSTEPS, ALLGATHER_SLICESTEPS };
+    NCCLCHECK(ncclEnqueueCheck(&info));
+    return ncclSuccess;
+  }
 }
 
 NCCL_API(ncclResult_t, ncclAllReduce, const void* sendbuff, void* recvbuff, size_t count,
@@ -132,6 +155,8 @@ ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count,
   return ncclSuccess;
 }
 
+NCCL_PARAM(ARBroadcastEnabled, "AR_BROADCAST_ENABLED", 0);
+
 NCCL_API(ncclResult_t, ncclBroadcast, const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root,
     ncclComm_t comm, cudaStream_t stream);
 ncclResult_t ncclBroadcast(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root,
@@ -147,16 +172,26 @@ ncclResult_t ncclBroadcast(const void* sendbuff, void* recvbuff, size_t count, n
   NvtxParamsBroadcast payload{count * ncclTypeSize(datatype), root};
   NVTX3_FUNC_WITH_PARAMS(Broadcast, BroadcastSchema, payload)
 
-  if (mscclAvailable() && !mscclIsCaller()) {
-    return mscclEnqueueCheck(
-      sendbuff, nullptr, nullptr, recvbuff, nullptr, nullptr,
-      count, datatype, root, 0, ncclSum, mscclFuncBroadcast, comm, stream);
+  if (ncclParamARBroadcastEnabled()) {
+    if (comm->rank != root) {
+      CUDACHECK(cudaMemsetAsync((void*)sendbuff, 0, count * ncclTypeSize(datatype), stream));
+    }
+    struct ncclInfo info = { ncclFuncAllReduce, "AllReduce",
+      sendbuff, recvbuff, count, datatype, ncclSum, 0, comm, stream, /* Args */
+      ALLREDUCE_CHUNKSTEPS, ALLREDUCE_SLICESTEPS };
+    return ncclEnqueueCheck(&info);
+  } else {
+    if (mscclAvailable() && !mscclIsCaller()) {
+      return mscclEnqueueCheck(
+        sendbuff, nullptr, nullptr, recvbuff, nullptr, nullptr,
+        count, datatype, root, 0, ncclSum, mscclFuncBroadcast, comm, stream);
+    }
+    struct ncclInfo info = { ncclFuncBroadcast, "Broadcast",
+      sendbuff, recvbuff, count, datatype, ncclSum, root, comm, stream, /* Args */
+      BROADCAST_CHUNKSTEPS, BROADCAST_SLICESTEPS };
+    NCCLCHECK(ncclEnqueueCheck(&info));
+    return ncclSuccess;
   }
-  struct ncclInfo info = { ncclFuncBroadcast, "Broadcast",
-    sendbuff, recvbuff, count, datatype, ncclSum, root, comm, stream, /* Args */
-    BROADCAST_CHUNKSTEPS, BROADCAST_SLICESTEPS };
-  NCCLCHECK(ncclEnqueueCheck(&info));
-  return ncclSuccess;
 }
 /* Deprecated original "in place" function, similar to MPI */
 NCCL_API(ncclResult_t, ncclBcast, void* buff, size_t count, ncclDataType_t datatype, int root,
@@ -198,6 +233,8 @@ ncclResult_t ncclReduce(const void* sendbuff, void* recvbuff, size_t count,
   return ncclSuccess;
 }
 
+NCCL_PARAM(ARReduceScatterEnabled, "AR_REDUCESCATTER_ENABLED", 0);
+
 NCCL_API(ncclResult_t, ncclReduceScatter, const void* sendbuff, void* recvbuff, size_t recvcount,
     ncclDataType_t datatype, ncclRedOp_t op, ncclComm* comm, cudaStream_t stream);
 ncclResult_t ncclReduceScatter(const void* sendbuff, void* recvbuff, size_t recvcount,
@@ -214,17 +251,32 @@ ncclResult_t ncclReduceScatter(const void* sendbuff, void* recvbuff, size_t recv
   NvtxParamsReduceScatter payload{recvcount * ncclTypeSize(datatype), op};
   NVTX3_FUNC_WITH_PARAMS(ReduceScatter, ReduceScatterSchema, payload)
 
-  if (mscclAvailable() && !mscclIsCaller()) {
-    return mscclEnqueueCheck(
-      sendbuff, nullptr, nullptr, recvbuff, nullptr, nullptr,
-      recvcount, datatype, 0, 0, op, mscclFuncReduceScatter, comm, stream);
-  }
+  if (ncclParamARReduceScatterEnabled()) {
+    int nRanks;
+    NCCLCHECK(ncclCommCount(comm, &nRanks));
+    uint64_t msgsize = recvcount * ncclTypeSize(datatype);
+    uint64_t totalcount = recvcount * nRanks;
+    uint64_t offset = comm->rank * msgsize;
+    struct ncclInfo info = { ncclFuncAllReduce, "AllReduce",
+      sendbuff, const_cast<void*>(sendbuff), totalcount, datatype, ncclSum, 0, comm, stream, /* Args */
+      ALLREDUCE_CHUNKSTEPS, ALLREDUCE_SLICESTEPS };
+    if ((uint64_t)sendbuff != (uint64_t)recvbuff + offset) {
+      CUDACHECK(cudaMemcpyAsync(recvbuff, (void*)((uint64_t)sendbuff + offset), msgsize, cudaMemcpyDeviceToDevice, stream));
+    }
+    return ncclEnqueueCheck(&info);
+  } else {
+    if (mscclAvailable() && !mscclIsCaller()) {
+      return mscclEnqueueCheck(
+        sendbuff, nullptr, nullptr, recvbuff, nullptr, nullptr,
+        recvcount, datatype, 0, 0, op, mscclFuncReduceScatter, comm, stream);
+    }
 
-  struct ncclInfo info = { ncclFuncReduceScatter, "ReduceScatter",
-    sendbuff, recvbuff, recvcount, datatype, op, 0, comm, stream, /* Args */
-    REDUCESCATTER_CHUNKSTEPS, REDUCESCATTER_SLICESTEPS };
-  NCCLCHECK(ncclEnqueueCheck(&info));
-  return ncclSuccess;
+    struct ncclInfo info = { ncclFuncReduceScatter, "ReduceScatter",
+      sendbuff, recvbuff, recvcount, datatype, op, 0, comm, stream, /* Args */
+      REDUCESCATTER_CHUNKSTEPS, REDUCESCATTER_SLICESTEPS };
+    NCCLCHECK(ncclEnqueueCheck(&info));
+    return ncclSuccess;
+  }
 }
 
 struct NvtxParamsSendRecv {
